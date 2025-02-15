@@ -15,6 +15,7 @@ import os
 import sys
 import pandas as pd
 import scipy.signal as signal
+import xlsxwriter
 
 # Set environment variable to allow OpenMP runtime duplication
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -23,7 +24,7 @@ class AudioApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Audio Recorder and Analyzer")
-        self.root.geometry("600x600")
+        self.root.geometry(f"600x{round((2/3)*self.root.winfo_screenheight())}")  # Set height to match screen height
 
         self.recording = False
         self.audio_data = None
@@ -74,20 +75,30 @@ class AudioApp:
         self.pause_button = tk.Button(control_frame, text="Pause", command=self.pause_audio, width=10)
         self.pause_button.pack(side=tk.LEFT, padx=5)
 
+        self.stop_playback_button = tk.Button(control_frame, text="Stop", command=self.stop_audio, width=10)
+        self.stop_playback_button.pack(side=tk.LEFT, padx=5)
+
         self.playback_bar = tk.Scale(self.root, from_=0, to=100, orient=tk.HORIZONTAL, length=400, resolution=0.01, state=tk.DISABLED)
         self.playback_bar.pack(pady=10)
 
-        self.analyze_button = tk.Button(self.root, text="Analyze Audio", command=self.analyze_audio, width=20)
-        self.analyze_button.pack(pady=10)
+        self.audio_graph_frame = tk.Frame(self.root, height=200)
+        self.audio_graph_frame.pack(pady=10, fill=tk.BOTH, expand=False)
+
+        self.buttons_frame = tk.Frame(self.root)
+        self.buttons_frame.pack(pady=0)
+
+        self.equalize_button = tk.Button(self.root, text="Equalize Audio", command=self.equalize_audio, width=20)
+        self.equalize_button.pack(pady=10)
+
+        self.hpss_button = tk.Button(self.root, text="Apply HPSS", command=self.apply_hpss, width=20)
+        self.hpss_button.pack(pady=10)
 
         self.fft_button = tk.Button(self.root, text="FFT Analysis", command=self.fft_analysis, width=20)
         self.fft_button.pack(pady=10)
 
-        self.extract_freq_button = tk.Button(self.root, text="Extract Frequency Signal", command=self.extract_frequency_component, width=25)
-        self.extract_freq_button.pack(pady=10)
+        self.spectrogram_button = tk.Button(self.root, text="Spectrogram", command=self.spectrogram_analysis, width=20)
+        self.spectrogram_button.pack(pady=10)
 
-        self.advanced_analyze_button = tk.Button(self.root, text="Spectrogram Analysis", command=self.advanced_analysis, width=20)
-        self.advanced_analyze_button.pack(pady=10)
 
     def start_recording(self):
         if not self.recording:
@@ -98,9 +109,19 @@ class AudioApp:
 
             self.recording = True
             self.audio_data = []
+            self.start_time = time.time()  # 시작 시간 기록
+            self.update_recording_timer()  # 타이머 업데이트 함수 호출
+
             self.stream = sd.InputStream(samplerate=self.samplerate, channels=1, callback=self.audio_callback)
             self.stream.start()
-            messagebox.showinfo("Recording", "Recording started.")
+
+    def update_recording_timer(self):
+        if self.recording:
+            elapsed_time = time.time() - self.start_time
+            self.record_button.config(text=f"Recording... {elapsed_time:.1f} sec")
+            self.root.after(100, self.update_recording_timer)  # 0.1초마다 업데이트
+        else:
+            self.record_button.config(text="Start Recording")
 
     def audio_callback(self, indata, frames, time, status):
         if self.recording:
@@ -112,17 +133,21 @@ class AudioApp:
             self.stream.stop()
             self.stream.close()
             self.audio_data = np.concatenate(self.audio_data, axis=0)
+            self.record_button.config(text="Start Recording")  # 버튼 텍스트 초기화
 
             # Ask the user where to save the recording
             save_path = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[("WAV files", "*.wav")], title="Save Recording")
             if save_path:
                 sf.write(save_path, self.audio_data, self.samplerate)
 
+                # Extract filename from save_path
+                filename = os.path.basename(save_path)
+
                 # Append metadata to the CSV file
-                metadata = pd.DataFrame([[save_path, self.process_conditions]], columns=["filename", "process_conditions"])
+                metadata = pd.DataFrame([[filename, self.process_conditions]], columns=["filename", "process_conditions"])
                 metadata.to_csv(self.metadata_file, mode='a', header=False, index=False)
 
-                messagebox.showinfo("Save", f"Recording saved as {save_path} and process conditions added to metadata.")
+                messagebox.showinfo("Save", f"Recording saved as {filename} and process conditions added to metadata.")
 
     def load_audio(self):
         file_path = filedialog.askopenfilename(filetypes=[("Audio Files", "*.wav")])
@@ -132,7 +157,22 @@ class AudioApp:
             duration = len(self.audio_data) / self.samplerate
             self.playback_label.config(text=f"Loaded File: {file_path.split('/')[-1]}")
             self.playback_bar.config(state=tk.NORMAL, from_=0, to=duration, resolution=0.01, label=f"0 / {duration:.2f} sec")
-            messagebox.showinfo("Load", "Audio file loaded successfully.")
+            # messagebox.showinfo("Load", "Audio file loaded successfully.")
+            
+            self.display_audio_waveform()
+
+    def display_audio_waveform(self):
+        for widget in self.audio_graph_frame.winfo_children():
+            widget.destroy()
+
+        fig, ax = plt.subplots(figsize=(8, 2), constrained_layout=True)  # Ensure axis labels are visible  # Increase height for better visibility of labels  # Reduce height for fixed placement
+        librosa.display.waveshow(self.audio_data, sr=self.samplerate, ax=ax)
+        ax.set(title="Waveform", xlabel="Time (s)", ylabel="Amplitude")
+
+        canvas = FigureCanvasTkAgg(fig, master=self.audio_graph_frame)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack()
+        canvas.draw()
 
     def play_audio(self):
         if self.audio_data is not None:
@@ -152,6 +192,17 @@ class AudioApp:
             self.paused = True
             self.playing = False
             sd.stop()
+
+    def stop_audio(self):
+        """오디오 재생을 완전히 정지하고 0초부터 다시 시작하도록 설정"""
+        if self.playing or self.paused:
+            self.playing = False
+            self.paused = False
+            self.playback_position = 0  # 재생 위치를 처음으로 초기화
+            sd.stop()
+            self.playback_bar.set(0)
+            self.playback_bar.config(label=f"0 / {len(self.audio_data) / self.samplerate:.2f} sec")
+
 
     def playback(self):
         try:
@@ -182,41 +233,207 @@ class AudioApp:
         finally:
             self.playing = False
 
-    def analyze_audio(self):
-        if self.audio_data is not None:
-            # 새로운 팝업 창 생성
-            new_window = tk.Toplevel(self.root)
-            new_window.title("Waveform Analysis")
-            new_window.geometry("800x400")
+    def apply_equalization(self, audio, sr):
+        """
+        특정 주파수 대역의 gain을 적용하여 equalization 수행
+        """
+        gains = {
+            (0, 1000): 0.5,   # 저주파 노이즈 감소
+            (1000, 5000): 1.5, # 중주파수 대역 강조
+            (5000, 20000): 2.0 # 고주파수 대역 강조
+        }
+        
+        output = np.zeros_like(audio)
+        
+        for (low, high), gain in gains.items():
+            low = max(low, 1e-6)  # 0Hz 방지
+            sos = signal.butter(2, [low / (sr / 2), high / (sr / 2)], btype='bandpass', output='sos')
+            filtered = signal.sosfilt(sos, audio) * gain
+            output += filtered
+        
+        return output
 
-            fig, ax = plt.subplots(figsize=(8, 4))
-            librosa.display.waveshow(self.audio_data, sr=self.samplerate, ax=ax)
-            ax.set(title="Waveform", xlabel="Time (s)", ylabel="Amplitude")
+    def equalize_audio(self):
+        """Equalization 후 원본과 비교하는 그래프를 생성하고, -eq 파일로 저장"""
+        if self.audio_data is None:
+            messagebox.showwarning("Warning", "No audio data available for Equalization.")
+            return
 
-            canvas = FigureCanvasTkAgg(fig, master=new_window)
-            canvas_widget = canvas.get_tk_widget()
-            canvas_widget.pack()
-            canvas.draw()
-        else:
-            messagebox.showwarning("Warning", "No audio data to analyze.")
+        # Equalization 적용
+        equalized_audio = self.apply_equalization(self.audio_data, self.samplerate)
+
+        # **파일 자동 저장 (-eq 추가)**
+        if self.loaded_file_path:
+            file_dir, file_name = os.path.split(self.loaded_file_path)
+            file_base, file_ext = os.path.splitext(file_name)
+            eq_file_name = f"{file_base}-eq{file_ext}"
+            eq_file_path = os.path.join(file_dir, eq_file_name)
+
+            sf.write(eq_file_path, equalized_audio, self.samplerate)  # Equalized 파일 저장
+            messagebox.showinfo("Saved", f"Equalized file saved as: {eq_file_path}")
+
+        # **Equalization 후 NaN이나 0값 방지**
+        if np.all(equalized_audio == 0):
+            messagebox.showerror("Error", "Equalization resulted in all zero values!")
+            return
+        equalized_audio = np.nan_to_num(equalized_audio)
+
+        # **새로운 Tkinter 창 생성**
+        new_window = tk.Toplevel(self.root)
+        new_window.title("Equalization Analysis")
+        new_window.geometry("1200x800")
+
+        fig, axs = plt.subplots(3, 2, figsize=(12, 10))  # 3행 2열 서브플롯
+        time_axis = np.linspace(0, len(self.audio_data) / self.samplerate, len(self.audio_data))
+
+        # (1) Waveform 비교
+        axs[0, 0].plot(time_axis, self.audio_data, label="Raw Audio", alpha=0.7)
+        axs[0, 1].plot(time_axis, equalized_audio, label="Equalized Audio", alpha=0.7)
+        axs[0, 0].set_title("Waveform (Raw)")
+        axs[0, 1].set_title("Waveform (Equalized)")
+
+        max_amplitude = max(np.max(np.abs(self.audio_data)), np.max(np.abs(equalized_audio)))
+        axs[0, 0].set_ylim(-max_amplitude, max_amplitude)
+        axs[0, 1].set_ylim(-max_amplitude, max_amplitude)
+
+        # (2) FFT 비교
+        fft_raw = np.fft.fft(self.audio_data)
+        fft_eq = np.fft.fft(equalized_audio)
+        freqs = np.fft.fftfreq(len(self.audio_data), 1 / self.samplerate)
+
+        axs[1, 0].plot(freqs[:len(freqs)//2], np.abs(fft_raw[:len(freqs)//2]), label="Raw FFT", alpha=0.7)
+        axs[1, 1].plot(freqs[:len(freqs)//2], np.abs(fft_eq[:len(freqs)//2]), label="Equalized FFT", alpha=0.7)
+        axs[1, 0].set_xscale("log")
+        axs[1, 1].set_xscale("log")
+
+        max_fft_magnitude = max(np.max(np.abs(fft_raw)), np.max(np.abs(fft_eq)))
+        axs[1, 0].set_ylim(0, max_fft_magnitude)
+        axs[1, 1].set_ylim(0, max_fft_magnitude)
+
+        # (3) Spectrogram 비교 (vmin, vmax 자동 조정)
+        _, _, _, im1 = axs[2, 0].specgram(self.audio_data, Fs=self.samplerate, NFFT=1024, cmap="magma")
+        _, _, _, im2 = axs[2, 1].specgram(equalized_audio, Fs=self.samplerate, NFFT=1024, cmap="cool")
+
+        vmin = min(im1.get_clim()[0], im2.get_clim()[0])  # 최소값
+        vmax = max(im1.get_clim()[1], im2.get_clim()[1])  # 최대값
+
+        im1.set_clim(vmin, vmax)
+        im2.set_clim(vmin, vmax)
+
+        axs[2, 0].set_title("Spectrogram (Raw)")
+        axs[2, 1].set_title("Spectrogram (Equalized)")
+
+        plt.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=new_window)
+        canvas.get_tk_widget().pack()
+        canvas.draw()
+
+    def apply_hpss(self):
+        """Equalized 오디오에 HPSS 적용 후 새로운 파일로 저장하고 비교 그래프를 생성"""
+        if self.audio_data is None or self.loaded_file_path is None:
+            messagebox.showwarning("Warning", "No audio data available for HPSS.")
+            return
+
+        # **Equalized 파일 불러오기**
+        file_dir, file_name = os.path.split(self.loaded_file_path)
+        file_base, file_ext = os.path.splitext(file_name)
+        eq_file_name = f"{file_base}-eq{file_ext}"
+        eq_file_path = os.path.join(file_dir, eq_file_name)
+
+        if not os.path.exists(eq_file_path):
+            messagebox.showerror("Error", f"Equalized file not found: {eq_file_path}")
+            return
+
+        eq_audio, eq_samplerate = librosa.load(eq_file_path, sr=None, mono=True)
+
+        # **HPSS 적용**
+        harmonic, percussive = librosa.effects.hpss(eq_audio)
+        hpss_audio = harmonic  # 하모닉 성분만 사용
+
+        # **HPSS 파일 저장 (-eq-hpss 추가)**
+        hpss_file_name = f"{file_base}-eq-hpss{file_ext}"
+        hpss_file_path = os.path.join(file_dir, hpss_file_name)
+
+        sf.write(hpss_file_path, hpss_audio, eq_samplerate)  # HPSS 적용된 파일 저장
+        messagebox.showinfo("Saved", f"HPSS-applied file saved as: {hpss_file_path}")
+
+        # **새로운 Tkinter 창 생성**
+        new_window = tk.Toplevel(self.root)
+        new_window.title("HPSS Analysis")
+        new_window.geometry("1200x800")
+
+        fig, axs = plt.subplots(3, 2, figsize=(12, 10))  # 3행 2열 서브플롯
+        time_axis = np.linspace(0, len(eq_audio) / eq_samplerate, len(eq_audio))
+
+        # (1) Waveform 비교
+        axs[0, 0].plot(time_axis, eq_audio, label="Equalized Audio", alpha=0.7)
+        axs[0, 1].plot(time_axis, hpss_audio, label="Equalized & HPSS Audio", alpha=0.7)
+        axs[0, 0].set_title("Waveform (Equalized)")
+        axs[0, 1].set_title("Waveform (Equalized & HPSS)")
+
+        max_amplitude = max(np.max(np.abs(eq_audio)), np.max(np.abs(hpss_audio)))
+        axs[0, 0].set_ylim(-max_amplitude, max_amplitude)
+        axs[0, 1].set_ylim(-max_amplitude, max_amplitude)
+
+        # (2) FFT 비교
+        fft_eq = np.fft.fft(eq_audio)
+        fft_hpss = np.fft.fft(hpss_audio)
+        freqs = np.fft.fftfreq(len(eq_audio), 1 / eq_samplerate)
+
+        axs[1, 0].plot(freqs[:len(freqs)//2], np.abs(fft_eq[:len(freqs)//2]), label="Equalized FFT", alpha=0.7)
+        axs[1, 1].plot(freqs[:len(freqs)//2], np.abs(fft_hpss[:len(freqs)//2]), label="Equalized & HPSS FFT", alpha=0.7)
+        axs[1, 0].set_xscale("log")
+        axs[1, 1].set_xscale("log")
+
+        max_fft_magnitude = max(np.max(np.abs(fft_eq)), np.max(np.abs(fft_hpss)))
+        axs[1, 0].set_ylim(0, max_fft_magnitude)
+        axs[1, 1].set_ylim(0, max_fft_magnitude)
+
+        # (3) Spectrogram 비교 (vmin, vmax 자동 조정)
+        _, _, _, im1 = axs[2, 0].specgram(eq_audio, Fs=eq_samplerate, NFFT=1024, cmap="magma")
+        _, _, _, im2 = axs[2, 1].specgram(hpss_audio, Fs=eq_samplerate, NFFT=1024, cmap="cool")
+
+        vmin = min(im1.get_clim()[0], im2.get_clim()[0])  # 최소값
+        vmax = max(im1.get_clim()[1], im2.get_clim()[1])  # 최대값
+
+        im1.set_clim(vmin, vmax)
+        im2.set_clim(vmin, vmax)
+
+        axs[2, 0].set_title("Spectrogram (Equalized)")
+        axs[2, 1].set_title("Spectrogram (Equalized & HPSS)")
+
+        plt.tight_layout()
+        canvas = FigureCanvasTkAgg(fig, master=new_window)
+        canvas.get_tk_widget().pack()
+        canvas.draw()
 
     def fft_analysis(self):
-        """FFT 분석 - 가장 강한 상위 5개의 주파수를 찾고 시각화"""
+        """HPSS까지 처리된 오디오 데이터를 기반으로 FFT 분석 수행 및 저장 기능 추가"""
         
-        if self.audio_data is None:
-            messagebox.showwarning("Warning", "No audio data available for FFT analysis.")
+        if self.loaded_file_path is None:
+            messagebox.showwarning("Warning", "No audio file loaded for FFT analysis.")
             return
-        
-        # 샘플레이트를 self.samplerate에서 가져오기
-        samplerate = self.samplerate  
+
+        # **HPSS 파일 불러오기 (-eq-hpss.wav)**
+        file_dir, file_name = os.path.split(self.loaded_file_path)
+        file_base, file_ext = os.path.splitext(file_name)
+        hpss_file_name = f"{file_base}-eq-hpss{file_ext}"
+        hpss_file_path = os.path.join(file_dir, hpss_file_name)
+
+        if not os.path.exists(hpss_file_path):
+            messagebox.showerror("Error", f"HPSS-processed file not found: {hpss_file_path}")
+            return
+
+        # HPSS 적용된 오디오 로드
+        audio_data, samplerate = librosa.load(hpss_file_path, sr=None, mono=True)
 
         # FFT 계산
-        N = len(self.audio_data)
+        N = len(audio_data)
         T = 1.0 / samplerate
-        yf = np.fft.fft(self.audio_data)
+        yf = np.fft.fft(audio_data)
         xf = np.fft.fftfreq(N, T)[:N//2]  # 양의 주파수 성분만 사용
         magnitude = 2.0/N * np.abs(yf[:N//2])  # 진폭 계산
-        
+
         # 가장 강한 주파수 찾기
         from scipy.signal import find_peaks
         peaks, _ = find_peaks(magnitude, height=0.00001)  # 특정 진폭 이상인 주파수 찾기
@@ -230,14 +447,14 @@ class AudioApp:
 
         # 새로운 창 생성
         new_window = tk.Toplevel(self.root)
-        new_window.title("FFT Analysis")
-        new_window.geometry("800x400")
+        new_window.title("FFT Analysis (HPSS Processed)")
+        new_window.geometry("800x500")
 
         # 그래프 그리기
         fig, ax = plt.subplots(figsize=(10, 4))
         ax.plot(xf, magnitude, label="FFT Spectrum")
         ax.set_xscale("log")  # 로그 스케일 적용
-        ax.set(title="FFT Analysis (Top Frequencies)", xlabel="Frequency (Hz)", ylabel="Amplitude")
+        ax.set(title="FFT Analysis (HPSS Processed)", xlabel="Frequency (Hz)", ylabel="Amplitude")
 
         # 상위 주파수 강조 표시
         for i in range(len(top_freqs)):
@@ -248,87 +465,154 @@ class AudioApp:
         # Tkinter에서 그래프 표시
         canvas = FigureCanvasTkAgg(fig, master=new_window)
         canvas.get_tk_widget().pack()
+
+        # 저장 버튼 추가
+        button_frame = tk.Frame(new_window)
+        button_frame.pack(pady=10)
+
+        # **CSV 저장 함수**
+        def save_fft_data():
+            save_path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                    filetypes=[("CSV files", "*.csv")],
+                                                    title="Save FFT Data")
+            if save_path:
+                fft_data = pd.DataFrame({"Frequency (Hz)": xf, "Magnitude": magnitude})
+                fft_data.to_csv(save_path, index=False)
+                messagebox.showinfo("Save", f"FFT Data saved as {save_path}")
+
+        # **PNG 저장 함수**
+        def save_fft_graph():
+            save_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                                    filetypes=[("PNG files", "*.png")],
+                                                    title="Save FFT Graph")
+            if save_path:
+                fig.savefig(save_path)
+                messagebox.showinfo("Save", f"FFT Graph saved as {save_path}")
+
+        # CSV 저장 버튼 추가
+        save_data_button = tk.Button(button_frame, text="Save Data to CSV", command=save_fft_data, width=20)
+        save_data_button.pack(side=tk.LEFT, padx=10)
+
+        # PNG 저장 버튼 추가
+        save_graph_button = tk.Button(button_frame, text="Save Graph as PNG", command=save_fft_graph, width=20)
+        save_graph_button.pack(side=tk.RIGHT, padx=10)
+
         canvas.draw()
 
         # 결과 출력
-        print("🔹 주요 주파수 목록:")
+        print("🔹 HPSS 처리된 오디오 기준 주요 주파수 목록:")
         for i in range(len(top_freqs)):
             print(f"{i+1}️⃣  {top_freqs[i]:.2f} Hz, 진폭: {top_amplitudes[i]:.6f}")
 
         return top_freqs, top_amplitudes  # 주요 주파수 및 진폭 반환
 
 
-    def advanced_analysis(self):
-        """스펙트로그램 분석을 수행하는 함수"""
-        if self.audio_data is not None:
-            new_window = tk.Toplevel(self.root)
-            new_window.title("Spectrogram Analysis")
-            new_window.geometry("800x400")
 
-            fig, ax = plt.subplots(figsize=(10, 4))
-            D = librosa.amplitude_to_db(np.abs(librosa.stft(self.audio_data)), ref=np.max)
-            img = librosa.display.specshow(D, sr=self.samplerate, x_axis='time', y_axis='log', ax=ax)
-            ax.set(title="Spectrogram Analysis")
-            fig.colorbar(img, ax=ax, format="%+2.0f dB")
+    def spectrogram_analysis(self):
+        """Raw, Equalized, HPSS된 오디오 데이터를 기반으로 Spectrogram 분석 및 저장 기능 추가"""
 
-            canvas = FigureCanvasTkAgg(fig, master=new_window)
-            canvas.get_tk_widget().pack()
-            canvas.draw()
-        else:
-            messagebox.showwarning("Warning", "No audio data available for spectrogram analysis.")
-
-
-    def extract_frequency_component(self):
-        """ 특정 주파수 성분만 추출하여 시간-진폭 그래프로 표시하는 함수 """
-
-        if self.audio_data is None:
-            messagebox.showwarning("Warning", "No audio data available for extraction.")
+        if self.loaded_file_path is None:
+            messagebox.showwarning("Warning", "No audio file loaded for Spectrogram analysis.")
             return
 
-        # 사용자 입력: 특정 주파수를 입력받음
-        target_freq = simpledialog.askfloat("Input", "Enter target frequency (Hz):", minvalue=0.1)
-        if target_freq is None:
-            return  # 입력이 취소된 경우 함수 종료
+        # **파일 경로 설정**
+        file_dir, file_name = os.path.split(self.loaded_file_path)
+        file_base, file_ext = os.path.splitext(file_name)
 
-        # 샘플레이트 가져오기
-        samplerate = self.samplerate
+        # 원본 (Raw) 오디오 불러오기
+        raw_audio, samplerate = librosa.load(self.loaded_file_path, sr=None, mono=True)
 
-        # FFT 수행
-        N = len(self.audio_data)
-        freqs = np.fft.fftfreq(N, 1 / samplerate)
-        fft_spectrum = np.fft.fft(self.audio_data)
+        # Equalized 오디오 불러오기 (-eq.wav)
+        eq_file_name = f"{file_base}-eq{file_ext}"
+        eq_file_path = os.path.join(file_dir, eq_file_name)
 
-        # 관심 주파수 대역 (±2 Hz)
-        bandwidth = 2
-        lower_bound = target_freq - bandwidth
-        upper_bound = target_freq + bandwidth
+        if os.path.exists(eq_file_path):
+            eq_audio, _ = librosa.load(eq_file_path, sr=None, mono=True)
+        else:
+            eq_audio = None  # Equalized 파일이 없을 경우 예외 처리
 
-        # 특정 주파수만 남기고 나머지 제거
-        filtered_spectrum = np.zeros_like(fft_spectrum)
-        mask = (freqs >= lower_bound) & (freqs <= upper_bound)
-        filtered_spectrum[mask] = fft_spectrum[mask]
+        # HPSS 적용된 오디오 불러오기 (-eq-hpss.wav)
+        hpss_file_name = f"{file_base}-eq-hpss{file_ext}"
+        hpss_file_path = os.path.join(file_dir, hpss_file_name)
 
-        # 역 FFT (IFFT) 수행 → 시간 도메인 신호 변환
-        extracted_signal = np.fft.ifft(filtered_spectrum).real
+        if os.path.exists(hpss_file_path):
+            hpss_audio, _ = librosa.load(hpss_file_path, sr=None, mono=True)
+        else:
+            hpss_audio = None  # HPSS 파일이 없을 경우 예외 처리
 
-        # 시간 축 생성
-        time_axis = np.linspace(0, N / samplerate, N)
-
-        # 새로운 창에서 그래프 표시
+        # **새로운 Tkinter 창 생성**
         new_window = tk.Toplevel(self.root)
-        new_window.title(f"Extracted {target_freq:.2f} Hz Signal")
-        new_window.geometry("800x400")
+        new_window.title("Spectrogram Analysis (Raw vs. Equalized vs. HPSS)")
+        new_window.geometry("1200x900")  # 창 크기 키우기
 
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.plot(time_axis, extracted_signal, label=f"Filtered {target_freq:.2f} Hz Signal", color='r')
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Amplitude")
-        ax.set_title(f"Extracted {target_freq:.2f} Hz Signal in Time Domain")
-        ax.legend()
-        ax.grid()
+        # **버튼을 추가할 프레임 생성**
+        button_frame = tk.Frame(new_window)
+        button_frame.pack(side=tk.BOTTOM, pady=10, fill=tk.X)
 
+        # **Spectrogram 그래프 생성**
+        fig, axs = plt.subplots(3, 1, figsize=(12, 10))  # 3개의 Spectrogram 비교
+
+        # **(1) Raw Audio Spectrogram**
+        D_raw = librosa.amplitude_to_db(np.abs(librosa.stft(raw_audio)), ref=np.max)
+        img1 = librosa.display.specshow(D_raw, sr=samplerate, x_axis='time', y_axis='log', ax=axs[0])
+        axs[0].set(title="Spectrogram (Raw Audio)")
+        fig.colorbar(img1, ax=axs[0], format="%+2.0f dB")
+
+        # **(2) Equalized Audio Spectrogram**
+        if eq_audio is not None:
+            D_eq = librosa.amplitude_to_db(np.abs(librosa.stft(eq_audio)), ref=np.max)
+            img2 = librosa.display.specshow(D_eq, sr=samplerate, x_axis='time', y_axis='log', ax=axs[1])
+            axs[1].set(title="Spectrogram (Equalized Audio)")
+            fig.colorbar(img2, ax=axs[1], format="%+2.0f dB")
+        else:
+            axs[1].text(0.5, 0.5, "Equalized Audio Not Found", fontsize=12, ha="center", va="center")
+
+        # **(3) HPSS Audio Spectrogram**
+        if hpss_audio is not None:
+            D_hpss = librosa.amplitude_to_db(np.abs(librosa.stft(hpss_audio)), ref=np.max)
+            img3 = librosa.display.specshow(D_hpss, sr=samplerate, x_axis='time', y_axis='log', ax=axs[2])
+            axs[2].set(title="Spectrogram (HPSS Processed Audio)")
+            fig.colorbar(img3, ax=axs[2], format="%+2.0f dB")
+        else:
+            axs[2].text(0.5, 0.5, "HPSS Processed Audio Not Found", fontsize=12, ha="center", va="center")
+
+        plt.tight_layout()
+
+        # **Tkinter Canvas 추가 (그래프 띄우기)**
         canvas = FigureCanvasTkAgg(fig, master=new_window)
-        canvas.get_tk_widget().pack()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)  # 버튼과 겹치지 않도록 확장
+
+        # **PNG 저장 함수**
+        def save_spectrogram_graph():
+            save_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                                    filetypes=[("PNG files", "*.png")],
+                                                    title="Save Spectrogram Graph")
+            if save_path:
+                fig.savefig(save_path)
+                messagebox.showinfo("Save", f"Spectrogram Graph saved as {save_path}")
+
+        # **CSV 저장 함수**
+        def save_spectrogram_data():
+            save_path = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                    filetypes=[("CSV files", "*.csv")],
+                                                    title="Save Spectrogram Data")
+            if save_path:
+                # 시간-주파수-진폭 데이터 저장
+                times = librosa.times_like(D_raw, sr=samplerate)
+                freqs = librosa.fft_frequencies(sr=samplerate)
+
+                # 데이터 프레임 생성
+                spectrogram_data = pd.DataFrame(D_raw, index=freqs, columns=times)
+                spectrogram_data.to_csv(save_path, index=True)
+                messagebox.showinfo("Save", f"Spectrogram Data saved as {save_path}")
+
+        # **버튼 추가**
+        save_graph_button = tk.Button(button_frame, text="Save Graph as PNG", command=save_spectrogram_graph, width=25)
+        save_graph_button.pack(side=tk.LEFT, padx=10)
+
+        save_data_button = tk.Button(button_frame, text="Save Data to CSV", command=save_spectrogram_data, width=25)
+        save_data_button.pack(side=tk.RIGHT, padx=10)
+
         canvas.draw()
 
 
@@ -345,6 +629,50 @@ class AudioApp:
         self.root.quit()  # Tkinter 루프 종료
         self.root.destroy()  # 모든 GUI 요소 제거
         print("프로그램이 정상적으로 종료되었습니다.")
+
+    def save_data_to_excel(self, data, filename="graph_data.xlsx"):
+        """
+        주어진 데이터를 pandas를 사용하여 Excel 파일로 저장 (openpyxl 없이)
+        """
+        save_path = filedialog.asksaveasfilename(defaultextension=".xlsx",
+                                                filetypes=[("Excel files", "*.xlsx")],
+                                                title="Save Data as Excel")
+        if save_path:
+            df = pd.DataFrame(data)
+            df.to_excel(save_path, index=False, engine="xlsxwriter")  # xlsxwriter 엔진 사용
+            messagebox.showinfo("Save", f"Data saved as {save_path}")
+
+
+    def save_graph_as_image(self, fig):
+        """
+        그래프를 이미지 파일로 저장
+        """
+        save_path = filedialog.asksaveasfilename(defaultextension=".png",
+                                                filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg")],
+                                                title="Save Graph as Image")
+        if save_path:
+            fig.savefig(save_path)
+            messagebox.showinfo("Save", f"Graph saved as {save_path}")
+
+    def add_save_buttons(self, parent_window, fig, data):
+        """
+        그래프 창에 데이터 저장 및 그래프 저장 버튼 추가
+        """
+        button_frame = tk.Frame(parent_window)
+        button_frame.pack(pady=10)
+
+        # 데이터 저장 버튼
+        save_data_button = tk.Button(button_frame, text="Save Data to Excel",
+                                    command=lambda: self.save_data_to_excel(data),
+                                    width=25)
+        save_data_button.pack(pady=5)
+
+        # 그래프 저장 버튼
+        save_graph_button = tk.Button(button_frame, text="Save Graph as Image",
+                                    command=lambda: self.save_graph_as_image(fig),
+                                    width=25)
+        save_graph_button.pack(pady=5)
+
 
 if __name__ == "__main__":
     print("Initializing the GUI...")
